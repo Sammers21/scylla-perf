@@ -12,12 +12,8 @@ use tokio::sync::oneshot::Receiver;
 use tokio::sync::oneshot::Sender;
 
 pub struct Executor {
-    total_keys: usize,
     concurrency: usize,
-    key_string_length: usize,
-    value_blob_size: usize,
     reads_percentage: f32,
-    writes_percentage: f32,
 
     key_values_range: Vec<KeyValue>,
 }
@@ -42,12 +38,8 @@ impl Executor {
             panic!("Reads percentage must be between 0.0 and 1.0");
         }
         Executor {
-            total_keys,
             concurrency,
-            key_string_length,
-            value_blob_size,
             reads_percentage,
-            writes_percentage: 1.0 - reads_percentage,
             key_values_range: generate_key_values_range(
                 total_keys,
                 key_string_length,
@@ -64,8 +56,6 @@ impl Executor {
         let create_keyspace = "CREATE KEYSPACE IF NOT EXISTS test WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 }";
         let create_table =
             "CREATE TABLE IF NOT EXISTS test.test (key text PRIMARY KEY, value blob);";
-        let write = "INSERT INTO test.test (key, value) VALUES (?, ?)";
-        let read = "SELECT * FROM test.test WHERE key = ?";
         session.query_unpaged(create_keyspace, &[]).await?;
         session.query_unpaged(create_table, &[]).await?;
         let (stop_sender, mut stop_receiver): (Sender<()>, Receiver<()>) = oneshot::channel();
@@ -169,7 +159,7 @@ fn generate_key_values_range(
     println!("{}", string);
     let mut key_values_range = Vec::new();
     let rng = &mut rand::thread_rng();
-    for i in 0..total_keys {
+    for _ in 0..total_keys {
         // generate random key string of length key_string_length
         let key = Alphanumeric.sample_string(rng, key_string_length);
         // generate random value blob of size value_blob_size
