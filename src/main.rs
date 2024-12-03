@@ -1,15 +1,15 @@
 mod executor;
 mod reporter;
 
-use std::sync::Arc;
 use anyhow::Result;
-use scylla::SessionBuilder;
-use std::time::Duration;
 use scylla::transport::session::{CurrentDeserializationApi, GenericSession};
+use scylla::SessionBuilder;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let concurrency = 10;
+    let concurrency = 100;
     let duration = Duration::from_secs(10);
     let scyllaHosts = "127.0.0.1:9042";
     let hostsSplit = scyllaHosts.split(",");
