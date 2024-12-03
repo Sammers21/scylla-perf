@@ -1,34 +1,29 @@
 mod executor;
 mod reporter;
 
+use std::sync::Arc;
 use anyhow::Result;
 use scylla::SessionBuilder;
 use std::time::Duration;
+use scylla::transport::session::{CurrentDeserializationApi, GenericSession};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let concurrency = 10;
     let duration = Duration::from_secs(10);
-    let readsPercentage = 0.5;
-    let writesPercentage = 0.5;
-    let valueSizeBytes = 100;
-    let keySizeBytes = 16;
     let scyllaHosts = "127.0.0.1:9042";
     let hostsSplit = scyllaHosts.split(",");
-    let testKeyspace = "test";
     let mut builder = SessionBuilder::new();
     for host in hostsSplit {
         builder = builder.known_node(host);
     }
-    let session = builder.build().await?;
-    let reporter = reporter::Reporter::new();
-    let executor = executor::Executor::new(
-        session,
-        concurrency,
-        reporter,
-    );
-    executor.start();
+    let session: Arc<GenericSession<CurrentDeserializationApi>> = Arc::new(builder.build().await?);
+    let mut executor = executor::Executor::new(concurrency, 32, 4 * 1024, 0.5, 1000);
+    let (stop_sender, executor_thread) = executor.start(session).await?;
     tokio::time::sleep(duration).await;
-    executor.stop();
+    if let Err(e) = stop_sender.send(()) {
+        println!("Error sending stop signal: {:?}", e);
+    }
+    executor_thread.await?;
     Ok(())
 }
