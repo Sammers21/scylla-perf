@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
     let hosts_split = args.scylla_hosts.split(",");
     let mut builder = SessionBuilder::new()
         .user(&args.user, &args.password)
-        .pool_size(PoolSize::PerHost(NonZeroUsize::new(args.pool_size).unwrap()))
+        .pool_size(PoolSize::PerShard(NonZeroUsize::new(args.pool_size).unwrap()))
         .keyspaces_to_fetch(["test"]);
     for host in hosts_split {
         builder = builder.known_node(host);

@@ -5,6 +5,7 @@ use crate::reporter::QueryType;
 use anyhow::Result;
 use rand::distributions::{Alphanumeric, DistString};
 use rand::{random, Rng};
+use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::session::{CurrentDeserializationApi, GenericSession};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -60,16 +61,22 @@ impl Executor {
             "CREATE TABLE IF NOT EXISTS test.test (key text PRIMARY KEY, value blob);";
         session.query_unpaged(create_keyspace, &[]).await?;
         session.query_unpaged(create_table, &[]).await?;
+        let prepared_read = session
+            .prepare("SELECT * FROM test.test WHERE key = ?")
+            .await?;
+        let prepared_write = session
+            .prepare("INSERT INTO test.test (key, value) VALUES (?, ?)")
+            .await?;
         let (stop_sender, mut stop_receiver): (Sender<()>, Receiver<()>) = oneshot::channel();
         let (queries_sender, mut queries_receiver): (
-            mpsc::Sender<(reporter::QueryType, Duration)>,
-            mpsc::Receiver<(reporter::QueryType, Duration)>,
+            mpsc::Sender<(QueryType, Duration)>,
+            mpsc::Receiver<(QueryType, Duration)>,
         ) = mpsc::channel(1000);
         let queries_sender = Arc::new(queries_sender);
         println!("Inserting initial key-value pairs...");
         // fill the channel with initial queries
         for kv in &self.key_values_range {
-            perform_write(session.clone(), kv.clone()).await?;
+            perform_write(session.clone(), prepared_write.clone(), kv.clone()).await?;
         }
         println!("Done inserting initial key-value pairs");
         println!("Starting queries...");
@@ -90,7 +97,8 @@ impl Executor {
                     println!("Stopping executor...");
                     break;
                 }
-                let mut rec_res: std::result::Result<(QueryType, Duration), TryRecvError> = queries_receiver.try_recv();
+                let mut rec_res: std::result::Result<(QueryType, Duration), TryRecvError> =
+                    queries_receiver.try_recv();
                 while rec_res.is_ok() {
                     let rec_uwp = rec_res.unwrap();
                     reporter.report_results(rec_uwp.0, rec_uwp.1);
@@ -104,18 +112,29 @@ impl Executor {
                     let queries_sender_cpy = queries_sender.clone();
                     let kvs = key_values_range.clone();
                     let reads_percentage = reads_percentage.clone();
+                    let pread = prepared_read.clone();
+                    let pwrite = prepared_write.clone();
                     tokio::spawn(async move {
                         let kv = kvs.get(rand::thread_rng().gen_range(0..kvs.len())).unwrap();
                         let rng = random::<f32>();
                         let res = if rng < reads_percentage {
-                            (QueryType::Read, perform_read(scp, kv.clone()).await)
+                            (
+                                QueryType::Read,
+                                perform_read(scp, pread, kv.clone()).await,
+                            )
                         } else {
-                            (QueryType::Write, perform_write(scp, kv.clone()).await)
+                            (
+                                QueryType::Write,
+                                perform_write(scp, pwrite, kv.clone()).await,
+                            )
                         };
                         if res.1.is_err() {
                             panic!("Error executing query: {:?}, {:?}", res.0, res.1.err());
                         }
-                        queries_sender_cpy.send((res.0, res.1.unwrap())).await.unwrap();
+                        queries_sender_cpy
+                            .send((res.0, res.1.unwrap()))
+                            .await
+                            .unwrap();
                     });
                 }
             }
@@ -128,11 +147,11 @@ impl Executor {
 
 async fn perform_read(
     session: Arc<GenericSession<CurrentDeserializationApi>>,
+    ps: PreparedStatement,
     kv: KeyValue,
 ) -> Result<Duration> {
     let start = tokio::time::Instant::now();
-    let read = "SELECT * FROM test.test WHERE key = ?";
-    let res = session.query_unpaged(read, (kv.0.clone(),)).await;
+    let res = session.execute_unpaged(&ps, (kv.0.clone(),)).await;
     if res.is_err() {
         Err(anyhow::anyhow!("Row not found"))
     } else {
@@ -142,13 +161,13 @@ async fn perform_read(
 }
 async fn perform_write(
     session: Arc<GenericSession<CurrentDeserializationApi>>,
+    ps: PreparedStatement,
     kv: KeyValue,
 ) -> Result<Duration> {
     let start = tokio::time::Instant::now();
-    let write = "INSERT INTO test.test (key, value) VALUES (?, ?)";
     let str: String = kv.0.clone();
     let vec: &Vec<u8> = &kv.1;
-    session.query_unpaged(write, (str, vec)).await?;
+    session.execute_unpaged(&ps, (str, vec)).await;
     let elapsed = start.elapsed();
     Ok(elapsed)
 }
