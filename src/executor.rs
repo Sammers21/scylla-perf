@@ -167,7 +167,7 @@ async fn perform_write(
     let start = tokio::time::Instant::now();
     let str: String = kv.0.clone();
     let vec: &Vec<u8> = &kv.1;
-    session.execute_unpaged(&ps, (str, vec)).await;
+    let _ = session.execute_unpaged(&ps, (str, vec)).await;
     let elapsed = start.elapsed();
     Ok(elapsed)
 }
