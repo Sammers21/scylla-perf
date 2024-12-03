@@ -1,12 +1,13 @@
 mod executor;
 mod reporter;
 
-use std::fmt::Debug;
 use anyhow::Result;
 use clap::Parser;
 use parse_duration::parse;
-use scylla::transport::session::{CurrentDeserializationApi, GenericSession};
+use scylla::transport::session::{CurrentDeserializationApi, GenericSession, PoolSize};
 use scylla::SessionBuilder;
+use std::fmt::Debug;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,7 +41,7 @@ struct Args {
     #[arg(
         short,
         long,
-        default_value = "100",
+        default_value = "32",
         help = "Length of the key strings in the database"
     )]
     key_string_length: usize,
@@ -74,6 +75,14 @@ struct Args {
 
     #[arg(long, default_value = "cassandra", help = "Scylla password")]
     pub password: String,
+
+    #[arg(
+        short,
+        long,
+        default_value = "10",
+        help = "Number of connections per host in the pool"
+    )]
+    pub pool_size: usize,
 }
 
 #[tokio::main]
@@ -88,9 +97,10 @@ async fn main() -> Result<()> {
         .collect::<String>();
     let pass = pass_first4 + &pass_after4;
     println!(
-        "Args: duration: {}s, scylla_host: {}, user: {}, password: {}, key_string_length: {}, value_blob_size: {}, reads_percentage: {}, total_keys: {}",
+        "Args: duration: {}s, scylla_host: {}, pool_size: {}, user: {}, password: {}, key_string_length: {}, value_blob_size: {}, reads_percentage: {}, total_keys: {}",
         args.duration.as_secs_f64(),
         args.scylla_hosts,
+        args.pool_size,
         args.user,
         pass,
         args.key_string_length,
@@ -99,7 +109,9 @@ async fn main() -> Result<()> {
         args.total_keys,
     );
     let hosts_split = args.scylla_hosts.split(",");
-    let mut builder = SessionBuilder::new().user(&args.user, &args.password);
+    let mut builder = SessionBuilder::new()
+        .user(&args.user, &args.password)
+        .pool_size(PoolSize::PerHost(NonZeroUsize::new(args.pool_size).unwrap()));
     for host in hosts_split {
         builder = builder.known_node(host);
     }
