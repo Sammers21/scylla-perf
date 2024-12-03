@@ -1,12 +1,14 @@
-use std::sync::Arc;
 use crate::reporter;
+use std::sync::Arc;
 
+use crate::reporter::QueryType;
 use anyhow::Result;
 use rand::distributions::{Alphanumeric, DistString};
 use rand::{random, Rng};
 use scylla::transport::session::{CurrentDeserializationApi, GenericSession};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::Receiver;
 use tokio::sync::oneshot::Sender;
@@ -59,8 +61,10 @@ impl Executor {
         session.query_unpaged(create_keyspace, &[]).await?;
         session.query_unpaged(create_table, &[]).await?;
         let (stop_sender, mut stop_receiver): (Sender<()>, Receiver<()>) = oneshot::channel();
-        let (queries_sender, mut queries_receiver): (mpsc::Sender<Duration>, mpsc::Receiver<Duration>) =
-            mpsc::channel(1000);
+        let (queries_sender, mut queries_receiver): (
+            mpsc::Sender<(reporter::QueryType, Duration)>,
+            mpsc::Receiver<(reporter::QueryType, Duration)>,
+        ) = mpsc::channel(1000);
         let queries_sender = Arc::new(queries_sender);
         println!("Inserting initial key-value pairs...");
         // fill the channel with initial queries
@@ -86,11 +90,12 @@ impl Executor {
                     println!("Stopping executor...");
                     break;
                 }
-                let mut duration = queries_receiver.try_recv();
-                while duration.is_ok() {
-                    reporter.report_results(duration.unwrap());
+                let mut rec_res: std::result::Result<(QueryType, Duration), TryRecvError> = queries_receiver.try_recv();
+                while rec_res.is_ok() {
+                    let rec_uwp = rec_res.unwrap();
+                    reporter.report_results(rec_uwp.0, rec_uwp.1);
                     current_concurrency -= 1;
-                    duration = queries_receiver.try_recv();
+                    rec_res = queries_receiver.try_recv();
                 }
                 // if there are still queries to be sent
                 while current_concurrency < concurrency {
@@ -103,14 +108,14 @@ impl Executor {
                         let kv = kvs.get(rand::thread_rng().gen_range(0..kvs.len())).unwrap();
                         let rng = random::<f32>();
                         let res = if rng < reads_percentage {
-                            perform_read(scp, kv.clone()).await
+                            (QueryType::Read, perform_read(scp, kv.clone()).await)
                         } else {
-                            perform_write(scp, kv.clone()).await
+                            (QueryType::Write, perform_write(scp, kv.clone()).await)
                         };
-                        if res.is_err() {
-                            panic!("Error executing query: {:?}", res.err());
+                        if res.1.is_err() {
+                            panic!("Error executing query: {:?}, {:?}", res.0, res.1.err());
                         }
-                        queries_sender_cpy.send(res.unwrap()).await.unwrap();
+                        queries_sender_cpy.send((res.0, res.1.unwrap())).await.unwrap();
                     });
                 }
             }

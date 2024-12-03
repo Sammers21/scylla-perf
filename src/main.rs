@@ -48,7 +48,7 @@ struct Args {
     #[arg(
         short,
         long,
-        default_value = "100",
+        default_value = "1024",
         help = "Size of the value blobs in the database"
     )]
     value_blob_size: usize,
