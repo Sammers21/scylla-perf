@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use crate::reporter;
 
 use anyhow::Result;
 use rand::distributions::{Alphanumeric, DistString};
@@ -68,7 +69,7 @@ impl Executor {
         session.query_unpaged(create_keyspace, &[]).await?;
         session.query_unpaged(create_table, &[]).await?;
         let (stop_sender, mut stop_receiver): (Sender<()>, Receiver<()>) = oneshot::channel();
-        let (queries_sender, mut queries_receiver): (mpsc::Sender<()>, mpsc::Receiver<()>) =
+        let (queries_sender, mut queries_receiver): (mpsc::Sender<Duration>, mpsc::Receiver<Duration>) =
             mpsc::channel(1000);
         let queries_sender = Arc::new(queries_sender);
         println!("Inserting initial key-value pairs...");
@@ -83,6 +84,7 @@ impl Executor {
         let reads_percentage = self.reads_percentage.clone();
         let future = async move {
             let mut current_concurrency = 0;
+            let mut reporter = reporter::Reporter::new();
             loop {
                 let stop = stop_receiver.try_recv();
                 // if stop signal received, stop executor
@@ -94,8 +96,11 @@ impl Executor {
                     println!("Stopping executor...");
                     break;
                 }
-                while queries_receiver.try_recv().is_ok() {
+                let mut duration = queries_receiver.try_recv();
+                while duration.is_ok() {
+                    reporter.report_results(duration.unwrap());
                     current_concurrency -= 1;
+                    duration = queries_receiver.try_recv();
                 }
                 // if there are still queries to be sent
                 while current_concurrency < concurrency {
@@ -112,11 +117,10 @@ impl Executor {
                         } else {
                             perform_write(scp, kv.clone()).await
                         };
-                        println!("Query took: {:?}", res);
                         if res.is_err() {
                             panic!("Error executing query: {:?}", res.err());
                         }
-                        queries_sender_cpy.send(()).await.unwrap();
+                        queries_sender_cpy.send(res.unwrap()).await.unwrap();
                     });
                 }
             }
