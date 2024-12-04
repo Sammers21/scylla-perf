@@ -4,15 +4,20 @@ use histogram::Histogram;
 use human_format::Formatter;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::time::Duration;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
+use tokio::spawn;
+use tokio::sync::Mutex;
 use tokio::time::Instant;
+use tokio_schedule::{every, Job};
+use std::time::Duration;
 
 pub trait Reporter {
     /// Create a new reporter with a given period between reports
     fn new(period: Duration) -> Self
     where
         Self: Sized;
-    fn report_results(&mut self, query_type: QueryType, time: Duration) -> ();
+    fn report_results(&self, query_type: QueryType, time: Duration) -> ();
 }
 
 #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug, Ord, PartialOrd)]
@@ -22,11 +27,10 @@ pub enum QueryType {
     Write,
 }
 
-#[derive(Clone)]
 pub struct SimpleReporter {
     period: Duration,
-    request_counts: usize,
-    request_durations: Duration,
+    request_counts: AtomicUsize,
+    request_durations_micros: AtomicUsize,
     first_reported_at: Instant,
     last_reported_at: Instant,
 }
@@ -40,39 +44,40 @@ pub struct PercentileReporter {
     last_reported_at: Instant,
 }
 
-unsafe impl Send for SimpleReporter {
+unsafe impl Send for SimpleReporter {}
+unsafe impl Send for PercentileReporter {}
+unsafe impl Sync for SimpleReporter {}
 
-}
-
-unsafe impl Send for PercentileReporter {
-
-}
-
-impl Reporter for SimpleReporter {
-    fn new(period: Duration) -> Self {
-        SimpleReporter {
+impl SimpleReporter {
+    pub fn new(period: Duration) -> Self {
+        let res = SimpleReporter {
             period,
-            request_counts: 0,
-            request_durations: Duration::from_secs(0),
+            request_counts: AtomicUsize::new(0),
+            request_durations_micros: AtomicUsize::new(0),
             last_reported_at: Instant::now(),
             first_reported_at: Instant::now(),
-        }
+        };
+        res
     }
 
-    fn report_results(&mut self, _: QueryType, latency: Duration) -> () {
-        self.request_counts += 1;
-        self.request_durations += latency;
-        if self.last_reported_at.elapsed() > self.period {
-            let rps = self.request_counts as f64 / self.first_reported_at.elapsed().as_secs_f64();
-            let avg_latency = self.request_durations.as_secs_f64() / self.request_counts as f64;
-            println!(
-                "Total: {} reqs, {:.2} req/s, avg latency: {:.2} ms",
-                self.request_counts,
-                rps,
-                avg_latency * 1000.0
-            );
-            self.last_reported_at = Instant::now();
-        }
+    pub fn print_report(&self) {
+        let request_counts = self.request_counts.load(std::sync::atomic::Ordering::Relaxed);
+        let request_durations_micros = self.request_durations_micros.load(std::sync::atomic::Ordering::Relaxed);
+        let rps = request_counts as f64 / self.first_reported_at.elapsed().as_secs_f64();
+        let avg_latency = request_durations_micros as f64 / request_counts as f64;
+        println!(
+            "Total requests: {}, RPS: {:.2}, Avg latency: {:.2} ms",
+            request_counts, rps, avg_latency / 1000.0
+        );
+    }
+
+    pub fn report_results(&self, _: QueryType, latency: Duration) -> () {
+        self.request_counts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.request_durations_micros.fetch_add(
+            latency.as_micros() as usize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 }
 
@@ -95,7 +100,7 @@ impl fmt::Display for QueryType {
     }
 }
 
-impl Reporter for PercentileReporter {
+impl PercentileReporter {
     fn new(period: Duration) -> Self {
         PercentileReporter {
             period,

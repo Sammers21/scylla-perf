@@ -12,6 +12,7 @@ use std::fmt::Debug;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -24,9 +25,17 @@ struct Args {
         short,
         long,
         default_value = "1000",
-        help = "Number of concurrent requests at any given moment of time"
+        help = "Number of concurrent requests at any given moment of time per executor",
     )]
     pub concurrency: usize,
+
+    #[arg(
+        short,
+        long,
+        default_value = "1",
+        help = "Number of executors to run in parallel."
+    )]
+    pub executors_count: usize,
 
     #[arg(short, long, value_parser = parse, default_value = "10s", help = "Duration of the benchmark"
     )]
@@ -107,13 +116,13 @@ struct Args {
         default_value = "true",
         help = "Drop the keyspace after the benchmark"
     )]
-    pub drop_test_keyspace: bool,
+    pub dont_drop_test_keyspace: bool,
 }
 
-fn reporter_mode(mode: String, period: Duration) -> Box<dyn Reporter + Send + 'static> {
-    let reporter: Box<dyn Reporter + Send + 'static> = match mode.as_str() {
-        "simple" => Box::new(SimpleReporter::new(period)),
-        "percentile" => Box::new(PercentileReporter::new(period)),
+fn reporter_mode(mode: String, period: Duration) -> SimpleReporter {
+    let reporter: SimpleReporter = match mode.as_str() {
+        "simple" => SimpleReporter::new(period),
+        // "percentile" => Box::new(PercentileReporter::new(period)),
         _ => panic!("Invalid mode: {}", mode),
     };
     reporter
@@ -131,7 +140,12 @@ async fn main() -> Result<()> {
         .collect::<String>();
     let pass = pass_first4 + &pass_after4;
     println!(
-        "Args: duration: {}s, scylla_host: {}, pool_size: {}, user: {}, password: {}, key_string_length: {}, value_blob_size: {}, reads_percentage: {}, total_keys: {}, report_mode: {}, report_period: {}, drop_test_keyspace: {}",
+        "Args: \
+         duration: {}s, scylla_host: {}, pool_size: {},\n\
+         user: {}, password: {}, key_string_length: {},\n\
+         value_blob_size: {}, reads_percentage: {}, total_keys: {},\n\
+         report_mode: {}, report_period: {}s, drop_test_keyspace: {}\
+         executors: {}",
         args.duration.as_secs_f64(),
         args.scylla_hosts,
         args.pool_size,
@@ -143,7 +157,8 @@ async fn main() -> Result<()> {
         args.total_keys,
         args.report_mode,
         args.report_period.as_secs_f64(),
-        args.drop_test_keyspace
+        args.dont_drop_test_keyspace,
+        args.executors_count
     );
     let hosts_split = args.scylla_hosts.split(",");
     let mut builder = SessionBuilder::new()
@@ -156,21 +171,42 @@ async fn main() -> Result<()> {
         builder = builder.known_node(host);
     }
     let session: Arc<GenericSession<CurrentDeserializationApi>> = Arc::new(builder.build().await?);
-    let reporter = reporter_mode(args.report_mode, args.report_period);
-    let mut executor = executor::Executor::new(
-        args.concurrency,
-        args.key_string_length,
-        args.value_blob_size,
-        args.reads_percentage,
-        args.total_keys,
-        reporter,
-        args.drop_test_keyspace,
-    );
-    let (stop_sender, executor_thread) = executor.start(session).await?;
-    tokio::time::sleep(args.duration).await;
-    if let Err(e) = stop_sender.send(()) {
-        println!("Error sending stop signal: {:?}", e);
+    let reporter = Arc::new(reporter_mode(args.report_mode, args.report_period));
+    let reporter_clone_for_thread = reporter.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(args.report_period).await;
+            reporter_clone_for_thread.print_report();
+        }
+    });
+    let mut handles = Vec::new();
+    for i in 0..args.executors_count {
+        let i_clone = i.clone();
+        let reporter_clone = reporter.clone();
+        let session_clone = session.clone();
+        let handle = tokio::spawn(async move {
+            let mut executor = executor::Executor::new(
+                args.concurrency,
+                args.key_string_length,
+                args.value_blob_size,
+                args.reads_percentage,
+                args.total_keys,
+                reporter_clone,
+                args.dont_drop_test_keyspace,
+            );
+            let (stop_sender, executor_thread) = executor.start(session_clone).await.unwrap();
+            tokio::time::sleep(args.duration).await;
+            println!("Requesting stop since the duration has passed");
+            if let Err(e) = stop_sender.send(()) {
+                println!("Error sending stop signal: {:?}", e);
+            }
+            executor_thread.await.unwrap();
+            println!("Executor #{} done", i_clone +1);
+        });
+        handles.push(handle);
     }
-    executor_thread.await?;
+    for handle in handles {
+        handle.await?;
+    }
     Ok(())
 }

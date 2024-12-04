@@ -1,4 +1,4 @@
-use crate::reporter::{QueryType, Reporter};
+use crate::reporter::{QueryType, Reporter, SimpleReporter};
 use anyhow::Result;
 use rand::distributions::{Alphanumeric, DistString};
 use rand::{random, Rng};
@@ -14,9 +14,9 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 pub struct Executor {
     concurrency: usize,
     reads_percentage: f32,
-    reporter: Arc<Mutex<Box<dyn Reporter + Send>>>,
+    reporter: Arc<SimpleReporter>,
     key_values_range: Vec<KeyValue>,
-    drop_test_keyspace: bool,
+    dont_drop_test_keyspace: bool,
 }
 
 pub struct KeyValue(String, Vec<u8>);
@@ -34,8 +34,8 @@ impl Executor {
         value_blob_size: usize,
         reads_percentage: f32,
         total_keys: usize,
-        reporter: Box<dyn Reporter + Send>,
-        drop_test_keyspace: bool,
+        reporter: Arc<SimpleReporter>,
+        dont_drop_test_keyspace: bool,
     ) -> Executor {
         if reads_percentage < 0.0 || reads_percentage > 1.0 {
             panic!("Reads percentage must be between 0.0 and 1.0");
@@ -48,8 +48,8 @@ impl Executor {
                 key_string_length,
                 value_blob_size,
             ),
-            reporter: Arc::new(Mutex::new(reporter)),
-            drop_test_keyspace,
+            reporter: reporter,
+            dont_drop_test_keyspace,
         }
     }
 
@@ -71,12 +71,6 @@ impl Executor {
             .await?;
         let (tx_stop_coordinator, mut rx_stop_coordinator): (Sender<()>, Receiver<()>) =
             oneshot::channel();
-        let (tx_stop_metrics_reporter, mut rx_stop_metrics_reporter): (Sender<()>, Receiver<()>) =
-            oneshot::channel();
-        let (tx_metrics, mut rx_metrics): (
-            broadcast::Sender<(QueryType, Duration)>,
-            broadcast::Receiver<(QueryType, Duration)>,
-        ) = broadcast::channel(10000);
         println!("Inserting initial key-value pairs...");
         for kv in &self.key_values_range {
             perform_write(session.clone(), prepared_write.clone(), kv.clone()).await?;
@@ -87,20 +81,7 @@ impl Executor {
         let key_values_range = self.key_values_range.clone();
         let reads_percentage = self.reads_percentage.clone();
         let reporter_clone = self.reporter.clone();
-        let _ = tokio::task::spawn(async move {
-            let mut reporter = reporter_clone.lock().await;
-            loop {
-                if rx_stop_metrics_reporter.try_recv().is_ok() {
-                    println!("Stopping metrics reporter...");
-                    break;
-                }
-                while let Ok(res) = rx_metrics.try_recv() {
-                    (*reporter).report_results(res.0, res.1);
-                }
-            }
-            ()
-        });
-        let drop_test_keyspace_clone = self.drop_test_keyspace.clone();
+        let dont_drop_test_keyspace_clone = self.dont_drop_test_keyspace.clone();
         let coordinator_thread = tokio::task::spawn(async move {
             let current_concurrency = Arc::new(AtomicUsize::new(0));
             loop {
@@ -111,9 +92,7 @@ impl Executor {
                     while current_concurrency.load(std::sync::atomic::Ordering::Relaxed) > 0 {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
-                    println!("All tasks finished, stopping metrics reporter...");
-                    tx_stop_metrics_reporter.send(()).unwrap();
-                    if drop_test_keyspace_clone {
+                    if !dont_drop_test_keyspace_clone {
                         println!("Dropping test keyspace...");
                         let res = session.query_unpaged("DROP KEYSPACE test", &[]).await;
                         if res.is_err() {
@@ -127,12 +106,12 @@ impl Executor {
                 while current_concurrency.load(std::sync::atomic::Ordering::Relaxed) < concurrency {
                     current_concurrency.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let session_clone = session.clone();
-                    let tx_metrics_clone = tx_metrics.clone();
                     let kvs = key_values_range.clone();
                     let reads_percentage = reads_percentage.clone();
                     let pread = prepared_read.clone();
                     let pwrite = prepared_write.clone();
                     let current_concurrency_clone = Arc::clone(&current_concurrency);
+                    let reporter_clone_clone = reporter_clone.clone();
                     tokio::spawn(async move {
                         let kv = kvs.get(rand::thread_rng().gen_range(0..kvs.len())).unwrap();
                         let rng = random::<f32>();
@@ -152,15 +131,7 @@ impl Executor {
                         } else {
                             let q_type = res.0;
                             let elapsed = res.1.unwrap();
-                            loop {
-                                let result = tx_metrics_clone.send((q_type, elapsed));
-                                if result.is_ok() {
-                                    break;
-                                } else {
-                                    println!("Error sending metrics: {:?}", result.err());
-                                    break;
-                                }
-                            }
+                            reporter_clone_clone.report_results(q_type, elapsed);
                         }
                         current_concurrency_clone
                             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
