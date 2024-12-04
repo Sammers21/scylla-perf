@@ -7,11 +7,12 @@ use std::fmt;
 use std::time::Duration;
 use tokio::time::Instant;
 
-pub struct Reporter {
-    request_counts: BTreeMap<QueryType, usize>,
-    request_durations: BTreeMap<QueryType, Histogram>,
-    first_reported_at: Instant,
-    last_reported_at: Instant,
+pub trait Reporter {
+    /// Create a new reporter with a given period between reports
+    fn new(period: Duration) -> Self
+    where
+        Self: Sized;
+    fn report_results(&mut self, query_type: QueryType, time: Duration) -> ();
 }
 
 #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug, Ord, PartialOrd)]
@@ -21,15 +22,83 @@ pub enum QueryType {
     Write,
 }
 
+#[derive(Clone)]
+pub struct SimpleReporter {
+    period: Duration,
+    request_counts: usize,
+    request_durations: Duration,
+    first_reported_at: Instant,
+    last_reported_at: Instant,
+}
+
+#[derive(Clone)]
+pub struct PercentileReporter {
+    period: Duration,
+    request_counts: BTreeMap<QueryType, usize>,
+    request_durations: BTreeMap<QueryType, Histogram>,
+    first_reported_at: Instant,
+    last_reported_at: Instant,
+}
+
+unsafe impl Send for SimpleReporter {
+
+}
+
+unsafe impl Send for PercentileReporter {
+
+}
+
+impl Reporter for SimpleReporter {
+    fn new(period: Duration) -> Self {
+        SimpleReporter {
+            period,
+            request_counts: 0,
+            request_durations: Duration::from_secs(0),
+            last_reported_at: Instant::now(),
+            first_reported_at: Instant::now(),
+        }
+    }
+
+    fn report_results(&mut self, _: QueryType, latency: Duration) -> () {
+        self.request_counts += 1;
+        self.request_durations += latency;
+        if self.last_reported_at.elapsed() > self.period {
+            let rps = self.request_counts as f64 / self.first_reported_at.elapsed().as_secs_f64();
+            let avg_latency = self.request_durations.as_secs_f64() / self.request_counts as f64;
+            println!(
+                "Total: {} reqs, {:.2} req/s, avg latency: {:.2} ms",
+                self.request_counts,
+                rps,
+                avg_latency * 1000.0
+            );
+            self.last_reported_at = Instant::now();
+        }
+    }
+}
+
+impl PercentileReporter {
+    fn colored_row(row: Vec<String>, color: Color) -> Vec<Cell> {
+        row.into_iter().map(|s| Cell::new(s).fg(color)).collect()
+    }
+
+    fn add_percentile(hist: &Histogram, percentile: f64, row: &mut Vec<String>) {
+        let start = hist.percentile(percentile).unwrap().unwrap().start();
+        let end = hist.percentile(percentile).unwrap().unwrap().end();
+        let between = end + start / 2;
+        row.push(format!("{:.2} ms", between as f64 / 1000.0));
+    }
+}
+
 impl fmt::Display for QueryType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:?}", self)
     }
 }
 
-impl Reporter {
-    pub fn new() -> Reporter {
-        Reporter {
+impl Reporter for PercentileReporter {
+    fn new(period: Duration) -> Self {
+        PercentileReporter {
+            period,
             request_counts: BTreeMap::new(),
             request_durations: BTreeMap::new(),
             last_reported_at: Instant::now(),
@@ -37,8 +106,8 @@ impl Reporter {
         }
     }
 
-    pub fn report_results(&mut self, query_type: QueryType, latency: Duration) {
-        for qt in &vec![QueryType::Total, query_type,] {
+    fn report_results(&mut self, query_type: QueryType, latency: Duration) -> () {
+        for qt in &vec![QueryType::Total, query_type] {
             let count = self.request_counts.entry(qt.clone()).or_insert(0);
             *count += 1;
             let hist = self
@@ -51,7 +120,7 @@ impl Reporter {
                 println!("Failed to add latency to histogram");
             }
         }
-        if self.last_reported_at.elapsed() > Duration::from_secs(1) {
+        if self.last_reported_at.elapsed() > self.period {
             let mut table = Table::new();
             table
                 .load_preset(UTF8_FULL)
@@ -85,16 +154,5 @@ impl Reporter {
             println!("{table}\n");
             self.last_reported_at = Instant::now();
         }
-    }
-
-    fn colored_row(row: Vec<String>, color: Color) -> Vec<Cell> {
-        row.into_iter().map(|s| Cell::new(s).fg(color)).collect()
-    }
-
-    fn add_percentile(hist: &Histogram, percentile: f64, row: &mut Vec<String>) {
-        let start = hist.percentile(percentile).unwrap().unwrap().start();
-        let end = hist.percentile(percentile).unwrap().unwrap().end();
-        let between = end + start / 2;
-        row.push(format!("{:.2} ms", between as f64 / 1000.0));
     }
 }
