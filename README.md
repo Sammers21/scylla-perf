@@ -7,7 +7,7 @@ $ cargo build --release
 
 Usage example (percentile mode):
 ```
-$ ./scylla-perf -m percentile
+$ ./target/release/scylla-perf  -m percentile
 
 Args: duration: 10s, scylla_host: 127.0.0.1:9042, pool_size: 2, user: cassandra, password: cass*****, key_string_length: 10, value_blob_size: 10, reads_percentage: 0.5, total_keys: 1000, report_mode: percentile, report_period: 1, drop_test_keyspace: true
 Generating 1000 key-value pairs, key length: 10, value size: 10
@@ -30,7 +30,7 @@ Starting queries...
 
 Usage example (simple mode):
 ```
-$ ./scylla-perf           
+$ ./target/release/scylla-perf          
 Args: duration: 10s, scylla_host: 127.0.0.1:9042, pool_size: 2, user: cassandra, password: cass*****, key_string_length: 10, value_blob_size: 10, reads_percentage: 0.5, total_keys: 1000, report_mode: simple, report_period: 1, drop_test_keyspace: true
 Generating 1000 key-value pairs, key length: 10, value size: 10
 Starting executor...
