@@ -1,12 +1,11 @@
 use crate::reporter;
-use std::sync::Arc;
-
 use crate::reporter::QueryType;
 use anyhow::Result;
 use rand::distributions::{Alphanumeric, DistString};
 use rand::{random, Rng};
 use scylla::prepared_statement::PreparedStatement;
 use scylla::transport::session::{CurrentDeserializationApi, GenericSession};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;

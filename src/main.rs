@@ -10,6 +10,7 @@ use std::fmt::Debug;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::error::TryRecvError;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -21,7 +22,7 @@ struct Args {
     #[arg(
         short,
         long,
-        default_value = "100",
+        default_value = "1000",
         help = "Number of concurrent requests at any given moment of time"
     )]
     concurrency: usize,
@@ -41,7 +42,7 @@ struct Args {
     #[arg(
         short,
         long,
-        default_value = "32",
+        default_value = "10",
         help = "Length of the key strings in the database"
     )]
     key_string_length: usize,
@@ -49,7 +50,7 @@ struct Args {
     #[arg(
         short,
         long,
-        default_value = "1024",
+        default_value = "10",
         help = "Size of the value blobs in the database"
     )]
     value_blob_size: usize,
@@ -79,8 +80,8 @@ struct Args {
     #[arg(
         short,
         long,
-        default_value = "10",
-        help = "Number of connections per host in the pool"
+        default_value = "2",
+        help = "Number of connections per shard in the connection pool"
     )]
     pub pool_size: usize,
 }
@@ -111,7 +112,9 @@ async fn main() -> Result<()> {
     let hosts_split = args.scylla_hosts.split(",");
     let mut builder = SessionBuilder::new()
         .user(&args.user, &args.password)
-        .pool_size(PoolSize::PerShard(NonZeroUsize::new(args.pool_size).unwrap()))
+        .pool_size(PoolSize::PerShard(
+            NonZeroUsize::new(args.pool_size).unwrap(),
+        ))
         .keyspaces_to_fetch(["test"]);
     for host in hosts_split {
         builder = builder.known_node(host);

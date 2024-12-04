@@ -3,6 +3,9 @@ name = "scylla-perf"
 version = "1.0.0"
 edition = "2021"
 
+[profile.dev]
+opt-level = 0
+
 [dependencies]
 clap = { version = "4.5.21", features = ["derive"] }
 scylla = { version = "0.15.0"}
